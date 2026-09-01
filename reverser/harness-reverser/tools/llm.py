@@ -64,7 +64,7 @@ class LLM:
         if model in ["gpt-5.4-mini", "gpt-5.4"]:
             temperature = 1
 
-        chat_model = ChatAnthropic(
+        chat_model = ChatOpenAI( #ChatAnthropic(
             model=model,
             temperature=temperature,
             api_key=config.api_key,
