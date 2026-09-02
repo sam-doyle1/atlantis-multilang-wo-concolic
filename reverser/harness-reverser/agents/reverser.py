@@ -25,7 +25,9 @@ from langgraph.prebuilt import ToolNode
 from langgraph.types import Send
 
 from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
 import anthropic
+import openai
 
 from tools.llm import LLM
 from tools.state import merge_with_update, merge_dict_with_update, merge_set_with_update
@@ -220,7 +222,7 @@ class PythonCode(BaseModel):
         )
     )
     other_affected_testlang_fields: List[TestLangRef] = Field(
-        ...,
+        default=[],
         description=(
             "REVIEW `code` and determine if this `code` also generates or encodes other testlang fields too. "
         )
@@ -243,14 +245,14 @@ class ReverserLLMOutput(BaseModel):
     )
 
     codes_to_analyze: List[CodeReference] = Field(
-        ...,
+        default=[],
         description=(
             "List of code elements (e.g., functions, structs, variables) to analyze in the next step. "
         )
     )
 
     sub_testlang: str = Field(
-        ...,
+        default="",
         description=(
             "Partial testlang output containing only new or updated records. "
             "This will be applied as a patch to the full testlang in the next step. "
@@ -259,28 +261,28 @@ class ReverserLLMOutput(BaseModel):
     )
 
     python_codes: List[PythonCode] = Field(
-        ...,
+        default=[],
         description=(
             "List of Python `encoder` or `generator`."
         )
     )
 
     records_to_remove: Set[str] = Field(
-        ...,
+        default=set(),
         description=(
             "Set of record names to be removed from the testlang in the next step."
         )
     )
 
     python_codes_to_remove: Set[str] = Field(
-        ...,
+        default=set(),
         description=(
             "Set of python code names to be removed in the next step."
         )
     )
 
     suppressed_warnings: List[int] = Field(
-        ...,
+        default=[],
         description=(
             "List of index of warnings that the LLM has decided to ignore."
             "Those warnings will not be included in the next step."
@@ -288,7 +290,7 @@ class ReverserLLMOutput(BaseModel):
     )
 
     suppressed_codes: List[int] = Field(
-        [],
+        default=[],
         description=(
             "List of indices of code blocks shown in <code-blocks> that are no longer needed for future analysis. "
             "Use this to reduce token usage by discarding any code that has already been fully reflected in sub_testlang, "
@@ -298,6 +300,7 @@ class ReverserLLMOutput(BaseModel):
     )
 
     lines_to_cover: List[FunctionLinesRef] = Field(
+        default=[],
         description=(
             "List of specific lines in functions that the LLM wants to cover to trigger the security vulnerability. "
             "This is used to guide the code generation process to focus on specific lines in functions."
@@ -305,6 +308,7 @@ class ReverserLLMOutput(BaseModel):
     )
 
     record_to_analyze_next: str = Field(
+        default="",
         description=(
             "Name of the record in testlang that the LLM wants to analyze next. "
             "This is used to guide the analysis process to focus on specific records."
@@ -312,6 +316,7 @@ class ReverserLLMOutput(BaseModel):
     )
 
     diff: str = Field(
+        default="",
         description=(
             "diff of the changes made to the testlang and python codes in this step. "
             "This should include record and field names and specific codes changes. "
@@ -1182,9 +1187,11 @@ class ReverserAgent:
                 try:
                     responses = await llm.ainvoke(messages)
                     llm_output: ReverserLLMOutput = responses[-1]
-                except anthropic.BadRequestError as e:
+                    if llm_output is None or not isinstance(llm_output, ReverserLLMOutput):
+                        raise ValueError(f"LLM returned invalid/unparsed response output: {llm_output}")
+                except (anthropic.BadRequestError, openai.BadRequestError, openai.OpenAIError) as e:
                     e_str = str(e)
-                    logger.error("anthropic.BadRequestError: {}", e_str)
+                    logger.error("LLM BadRequest/APIError: {}", e_str)
 
                     logger.info("Retrying after 5 seconds")
                     await asyncio.sleep(5)
@@ -1212,8 +1219,8 @@ class ReverserAgent:
                         try:
                             responses = await llm.ainvoke(messages)
                             llm_output: ReverserLLMOutput = responses[-1]
-                        except anthropic.BadRequestError as e:
-                            logger.error("Anthropic BadRequestError after removing {}: {}", ANTHROPIC_BETA_HEADER_KEY, str(e))
+                        except (anthropic.BadRequestError, openai.BadRequestError) as e:
+                            logger.error("LLM BadRequestError after removing {}: {}", ANTHROPIC_BETA_HEADER_KEY, str(e))
                             if "ttl: Extra inputs are not permitted" not in str(e):
                                 raise
 
@@ -1267,6 +1274,10 @@ class ReverserAgent:
                             raise e
                     else:
                         raise
+
+                if llm_output is None or not isinstance(llm_output, ReverserLLMOutput):
+                    raise ValueError(f"LLM output resolution failed, got: {llm_output}")
+
                 logger.info("[LLM responses][{}]\n{}", llm.model_name, llm_output)
                 if state["warnings"]:
                     # LLM may have suppressed some warnings
@@ -1312,6 +1323,9 @@ class ReverserAgent:
                 msg.content += f"\n\n<critical_warning>Resolve `{REDACT}` by checking `name` and `file_path`.</critical_warning>\n"
 
     def cache_anthropic_msg(self, msg: BaseMessage):
+        if hasattr(self, "llms") and self.model in self.llms:
+            if isinstance(self.llms[self.model].chat_model, ChatOpenAI):
+                return
         if isinstance(msg, BaseMessage) and isinstance(msg.content, str):
             cache_control = {"type": "ephemeral"}
             if self.cache_control_ttl:

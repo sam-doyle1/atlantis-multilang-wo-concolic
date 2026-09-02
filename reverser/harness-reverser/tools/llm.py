@@ -1,3 +1,4 @@
+import json
 from dateutil import parser
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage
@@ -42,6 +43,36 @@ def standardize_model_name(model_name: str) -> str:
     return model_name
 
 
+def parse_output_fallback(response, output_format):
+    """Fallback parser if structured output Runnable returned None or raw AIMessage."""
+    if response is None:
+        return None
+    if output_format and isinstance(response, output_format):
+        return response
+    if isinstance(response, AIMessage):
+        # 1. Try extracting tool_calls
+        if response.tool_calls:
+            for tc in response.tool_calls:
+                if isinstance(tc, dict) and tc.get("args"):
+                    try:
+                        return output_format(**tc["args"])
+                    except Exception as e:
+                        logger.warning("Fallback tool call parse failed: {}", e)
+        # 2. Try parsing text content as JSON
+        if isinstance(response.content, str) and response.content.strip():
+            content = response.content.strip()
+            if "```" in content:
+                lines = content.splitlines()
+                json_lines = [l for l in lines if not l.startswith("```")]
+                content = "\n".join(json_lines)
+            try:
+                data = json.loads(content)
+                return output_format(**data)
+            except Exception as e:
+                logger.warning("Fallback JSON text parse failed: {}", e)
+    return response
+
+
 class LLM:
     chat_model: BaseChatModel
     model_name: str
@@ -64,7 +95,15 @@ class LLM:
         if model in ["gpt-5.4-mini", "gpt-5.4"]:
             temperature = 1
 
-        chat_model = ChatOpenAI( #ChatAnthropic(
+        # Strip Anthropic-specific beta headers if using ChatOpenAI
+        if model_kwargs and isinstance(model_kwargs, dict):
+            extra_headers = model_kwargs.get("extra_headers")
+            if isinstance(extra_headers, dict):
+                extra_headers.pop("anthropic-beta", None)
+                if not extra_headers:
+                    model_kwargs.pop("extra_headers", None)
+
+        chat_model = ChatOpenAI(
             model=model,
             temperature=temperature,
             api_key=config.api_key,
@@ -74,6 +113,7 @@ class LLM:
         )
 
         self.chat_model = chat_model
+        self.output_format = output_format
 
         assert (
             tools is None or output_format is None
@@ -81,9 +121,13 @@ class LLM:
 
         if tools is not None:
             chat_model = chat_model.bind_tools(tools)
-
         elif output_format is not None:
-            chat_model = chat_model.with_structured_output(output_format)
+            if isinstance(chat_model, ChatOpenAI):
+                chat_model = chat_model.with_structured_output(
+                    output_format, method="function_calling"
+                )
+            else:
+                chat_model = chat_model.with_structured_output(output_format)
 
         self.runnable_chat_model = chat_model
         self.model_name = model
@@ -96,18 +140,14 @@ class LLM:
     ) -> list[BaseMessage]:
         """Invoke the model with the given messages.
         This function returns the messages with the model's response appended.
-
-        Args:
-            messages (list[BaseMessage]): The messages to send to the model.
-            choice (AutoPromptChoice): The choice of autoprompt to use.
-            model (BaseChatModel, optional): The model to use. Defaults to None.
-
-        Returns:
-            list[BaseMessage]: The updated messages.
         """
 
         response = self.runnable_chat_model.invoke(messages, **kwargs)
-        #messages.append(response)
+        if self.output_format and not isinstance(response, self.output_format):
+            parsed = parse_output_fallback(response, self.output_format)
+            if parsed is not None:
+                response = parsed
+
         return messages + [response]
 
     async def ainvoke(
@@ -121,4 +161,9 @@ class LLM:
         if max_tokens:
             llm = llm.bind(max_tokens=max_tokens)
         response = await llm.ainvoke(messages, **kwargs)
+        if self.output_format and not isinstance(response, self.output_format):
+            parsed = parse_output_fallback(response, self.output_format)
+            if parsed is not None:
+                response = parsed
+
         return messages + [response]
