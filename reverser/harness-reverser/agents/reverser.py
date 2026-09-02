@@ -1109,7 +1109,14 @@ class ReverserAgent:
         if context_msg:
             context_msgs.append(HumanMessage(inspect.cleandoc(context_msg), name="current_context"))
 
-        warnings += special_warnings
+        all_warns = warnings + special_warnings
+        seen_warns = set()
+        dedup_warns = []
+        for w in all_warns:
+            if w not in seen_warns:
+                seen_warns.add(w)
+                dedup_warns.append(w)
+        warnings = dedup_warns
 
         if error:
             llm_output = state["llm_output"]
@@ -1243,7 +1250,10 @@ class ReverserAgent:
                             for content in cache_control_contents:
                                 content["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
                     elif ("No models have context window large enough for this call" in e_str or
-                          "prompt is too long: " in e_str):
+                          "prompt is too long: " in e_str or
+                          "context_length_exceeded" in e_str or
+                          "maximum context length" in e_str or
+                          "context window" in e_str.lower()):
                         try:
                             self.reduce_input_tokens(messages, state["code_blocks"])
                             responses = await llm.ainvoke(messages)
