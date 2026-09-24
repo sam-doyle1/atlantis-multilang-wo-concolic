@@ -2,7 +2,12 @@
 
 set -e
 
-get_cp no_cov
+get_cp
+
+if [ -d /coverage-out/work/build ]; then
+    mkdir -p /work/build
+    rsync -a /coverage-out/work/build/ /work/build/
+fi
 
 export CRS_TARGET=$OSS_CRS_TARGET
 python3 /main.py

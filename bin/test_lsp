@@ -2,4 +2,9 @@
 
 get_cp no_cov_symcc
 
+if [ -d /coverage-out/work/build ]; then
+    mkdir -p /work/build
+    rsync -a /coverage-out/work/build/ /work/build/
+fi
+
 test_lsp.py
